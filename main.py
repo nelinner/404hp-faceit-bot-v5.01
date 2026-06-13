@@ -1,4 +1,4 @@
-# main.py — 404hp FACEIT (полный код, хост в результате, база не сбрасывается)
+# main.py — 404hp FACEIT (полный код, новый токен, все функции)
 import asyncio, logging, sqlite3, hashlib, secrets, random, os
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
@@ -17,7 +17,7 @@ HEAD_ADMIN_USERNAME = "nelinner"
 DB_NAME = "faceit_data.db"
 OLD_DB_NAME = "404hp_faceit.db"
 
-# Удаляем только совсем старые, неиспользуемые базы
+# Удаляем только совсем старые базы
 for f in ["404hp_faceit_v2.db", "database.db", "404hp_faceit_new.db"]:
     if os.path.exists(f):
         try: os.remove(f)
@@ -33,14 +33,14 @@ ROLE_NAMES = {
     'player': '🎮 Игрок',
     'premium': '⭐ Premium',
     'admin': '🛡 Админ',
-    'director': '👑 Руководитель'
+    'director': '⚡ Руководитель'
 }
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# ---------- БАЗА ДАННЫХ С МИГРАЦИЕЙ ----------
+# ---------- БАЗА ДАННЫХ (ВЕЧНАЯ) ----------
 def get_db():
     conn = sqlite3.connect(DB_NAME)
     conn.row_factory = sqlite3.Row
@@ -72,7 +72,6 @@ def create_tables(conn):
     c.execute("""CREATE TABLE IF NOT EXISTS bans (
         pid INT, till TEXT, reason TEXT, admin TEXT
     )""")
-    # добавляем недостающие столбцы, если таблицы уже существовали
     try: c.execute("ALTER TABLE rooms ADD COLUMN finished INTEGER DEFAULT 0")
     except sqlite3.OperationalError: pass
     try: c.execute("ALTER TABLE players ADD COLUMN prem_till TEXT")
@@ -83,7 +82,7 @@ def create_tables(conn):
 
 def migrate_old_db():
     if not os.path.exists(OLD_DB_NAME): return
-    print("🔍 Найдена старая база, переношу игроков...")
+    print("🔍 Перенос игроков из старой базы...")
     try:
         old_conn = sqlite3.connect(OLD_DB_NAME)
         old_conn.row_factory = sqlite3.Row
@@ -285,6 +284,29 @@ async def reg_pw2(msg: types.Message, state: FSMContext):
     await msg.answer_photo(REGISTRATION_IMAGE, caption=f"✅ Добро пожаловать, {data['n']}!\nРоль: {ROLE_NAMES[role]}\nELO: 0")
     await state.clear()
 
+# ---------- ВХОД (ИСПРАВЛЕН) ----------
+@dp.message(Command("login"))
+async def login(msg: types.Message):
+    parts = msg.text.split()
+    if len(parts) != 3:
+        await msg.answer("/login ник пароль")
+        return
+    nick, pw = parts[1], parts[2]
+    conn = get_db()
+    u = conn.execute("SELECT id, pw, salt, role FROM players WHERE nick=?", (nick,)).fetchone()
+    if not u:
+        await msg.answer("❌ Пользователь с таким ником не найден")
+        conn.close()
+        return
+    if check_pw(pw, u['salt'], u['pw']):
+        conn.execute("UPDATE players SET id=? WHERE id=?", (msg.from_user.id, u['id']))
+        conn.commit()
+        conn.close()
+        await msg.answer_photo(MAIN_MENU_IMAGE, caption=f"✅ Вход выполнен!\nРоль: {ROLE_NAMES.get(u['role'], 'Игрок')}")
+    else:
+        conn.close()
+        await msg.answer_photo(MAIN_MENU_IMAGE, caption="❌ Неверный пароль")
+
 # ---------- ПОИСК МАТЧА ----------
 @dp.callback_query(lambda c: c.data == "find")
 async def find_match(cb: types.CallbackQuery):
@@ -442,7 +464,6 @@ async def result_score(msg: types.Message, state: FSMContext):
         ct_pl = conn.execute("SELECT * FROM team_players WHERE team=? ORDER BY pos", (ct_team['id'],)).fetchall()
         t_pl = conn.execute("SELECT * FROM team_players WHERE team=? ORDER BY pos", (t_team['id'],)).fetchall()
         ct_won = ct > t
-        # Обновляем статистику
         for p in ct_pl:
             u = conn.execute("SELECT * FROM players WHERE id=?", (p['pid'],)).fetchone()
             if u:
@@ -458,17 +479,14 @@ async def result_score(msg: types.Message, state: FSMContext):
                 m, w, l = u['matches']+1, u['wins']+(1 if not ct_won else 0), u['losses']+(0 if not ct_won else 1)
                 conn.execute("UPDATE players SET elo=?, rank=?, matches=?, wins=?, losses=?, wr=? WHERE id=?", (ne, get_rank(ne), m, w, l, round(w/m*100,1), p['pid']))
         conn.execute("UPDATE rooms SET finished=1 WHERE id=?", (rid,))
-        # Получаем хоста лобби
         room = conn.execute("SELECT creator FROM rooms WHERE id=?", (rid,)).fetchone()
         host_nick = None
         if room:
             host = conn.execute("SELECT nick FROM players WHERE id=?", (room['creator'],)).fetchone()
             if host: host_nick = host['nick']
         conn.commit(); conn.close()
-        # Формируем сообщение
         txt = f"📊 РЕЗУЛЬТАТ МАТЧА\nЛобби #{rid}\n"
-        if host_nick:
-            txt += f"👑 Хост лобби: {host_nick}\n"
+        if host_nick: txt += f"👑 Хост лобби: {host_nick}\n"
         txt += f"🔵 CT: {ct}\n"
         for p in ct_pl: txt += f"• {p['nick']}\n"
         txt += f"\n🔴 T: {t}\n"
@@ -521,7 +539,7 @@ async def a_users(cb: types.CallbackQuery):
     txt = "👥 Пользователи:\n" + "\n".join(f"{p['nick']} | {ROLE_NAMES.get(p['role'],'?')} | ELO: {p['elo']}" for p in pls)
     await cb.message.delete(); await bot.send_photo(cb.from_user.id, MAIN_MENU_IMAGE, caption=txt, reply_markup=admin_kb())
 
-# ---------- ЗАМЕНА ИГРОКА (с публикацией в канал) ----------
+# ---------- ЗАМЕНА ИГРОКА ----------
 @dp.callback_query(lambda c: c.data == "a_replace")
 async def replace_start(cb: types.CallbackQuery, state: FSMContext):
     if not await is_admin(cb.from_user.id): return
@@ -597,7 +615,7 @@ async def repl_ok(cb: types.CallbackQuery, state: FSMContext):
     except: pass
     await state.clear()
 
-# ---------- БАН (с публикацией в канал) ----------
+# ---------- БАН ----------
 @dp.callback_query(lambda c: c.data == "a_ban")
 async def a_ban(cb: types.CallbackQuery, state: FSMContext):
     if not await is_admin(cb.from_user.id): return
