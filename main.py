@@ -1,4 +1,4 @@
-# main.py — 404hp FACEIT (ПОЛНЫЙ КОД, ВСЕ ФУНКЦИИ)
+# main.py — 404hp FACEIT (полный код, хост в результате, база не сбрасывается)
 import asyncio, logging, sqlite3, hashlib, secrets, random, os
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
@@ -17,7 +17,7 @@ HEAD_ADMIN_USERNAME = "nelinner"
 DB_NAME = "faceit_data.db"
 OLD_DB_NAME = "404hp_faceit.db"
 
-# Удаляем совсем старые базы (оставляем только актуальные)
+# Удаляем только совсем старые, неиспользуемые базы
 for f in ["404hp_faceit_v2.db", "database.db", "404hp_faceit_new.db"]:
     if os.path.exists(f):
         try: os.remove(f)
@@ -33,7 +33,7 @@ ROLE_NAMES = {
     'player': '🎮 Игрок',
     'premium': '⭐ Premium',
     'admin': '🛡 Админ',
-    'director': '⚡ Руководитель'
+    'director': '👑 Руководитель'
 }
 
 logging.basicConfig(level=logging.INFO)
@@ -414,7 +414,7 @@ async def draw(msg: types.Message):
         print(f"Ошибка в draw: {e}")
         await msg.answer("❌ Ошибка при жеребьёвке")
 
-# ---------- РЕЗУЛЬТАТ (С ОБЯЗАТЕЛЬНЫМ СКРИНШОТОМ) ----------
+# ---------- РЕЗУЛЬТАТ (С ОБЯЗАТЕЛЬНЫМ СКРИНШОТОМ И ХОСТОМ) ----------
 @dp.message(Command("result"))
 async def result_start(msg: types.Message, state: FSMContext):
     if not await is_admin(msg.from_user.id): await msg.answer("❌ Только админ"); return
@@ -442,6 +442,7 @@ async def result_score(msg: types.Message, state: FSMContext):
         ct_pl = conn.execute("SELECT * FROM team_players WHERE team=? ORDER BY pos", (ct_team['id'],)).fetchall()
         t_pl = conn.execute("SELECT * FROM team_players WHERE team=? ORDER BY pos", (t_team['id'],)).fetchall()
         ct_won = ct > t
+        # Обновляем статистику
         for p in ct_pl:
             u = conn.execute("SELECT * FROM players WHERE id=?", (p['pid'],)).fetchone()
             if u:
@@ -457,8 +458,18 @@ async def result_score(msg: types.Message, state: FSMContext):
                 m, w, l = u['matches']+1, u['wins']+(1 if not ct_won else 0), u['losses']+(0 if not ct_won else 1)
                 conn.execute("UPDATE players SET elo=?, rank=?, matches=?, wins=?, losses=?, wr=? WHERE id=?", (ne, get_rank(ne), m, w, l, round(w/m*100,1), p['pid']))
         conn.execute("UPDATE rooms SET finished=1 WHERE id=?", (rid,))
+        # Получаем хоста лобби
+        room = conn.execute("SELECT creator FROM rooms WHERE id=?", (rid,)).fetchone()
+        host_nick = None
+        if room:
+            host = conn.execute("SELECT nick FROM players WHERE id=?", (room['creator'],)).fetchone()
+            if host: host_nick = host['nick']
         conn.commit(); conn.close()
-        txt = f"📊 РЕЗУЛЬТАТ МАТЧА\nЛобби #{rid}\n🔵 CT: {ct}\n"
+        # Формируем сообщение
+        txt = f"📊 РЕЗУЛЬТАТ МАТЧА\nЛобби #{rid}\n"
+        if host_nick:
+            txt += f"👑 Хост лобби: {host_nick}\n"
+        txt += f"🔵 CT: {ct}\n"
         for p in ct_pl: txt += f"• {p['nick']}\n"
         txt += f"\n🔴 T: {t}\n"
         for p in t_pl: txt += f"• {p['nick']}\n"
